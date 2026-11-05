@@ -2,7 +2,7 @@ name: env-setup
 label: Setup Assistant
 kind: standalone
 version: 0.3.0
-author: nick
+author: delta-one-net
 description: >
   On-demand credential channel for Hermes. The agent requests environment
   variables by NAME only, when the chat actually needs them; the user fills

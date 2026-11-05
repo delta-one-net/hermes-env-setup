@@ -65,7 +65,7 @@ just declares its variables and optionally its own forms.
 ## Install (one click)
 
 ```
-hermes://plugin/install?repo=nickhechtel/hermes-env-setup&enable=1
+hermes://plugin/install?repo=delta-one-net/hermes-env-setup&enable=1
 ```
 
 The desktop app shows a confirmation dialog and picks the components:
@@ -75,7 +75,7 @@ The desktop app shows a confirmation dialog and picks the components:
 Manual install on the gateway host:
 
 ```bash
-git clone https://github.com/nickhechtel/hermes-env-setup ~/.hermes/plugins/env-setup
+git clone https://github.com/delta-one-net/hermes-env-setup ~/.hermes/plugins/env-setup
 hermes plugins enable env-setup
 ```
 

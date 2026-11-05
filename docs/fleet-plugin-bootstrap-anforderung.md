@@ -16,7 +16,7 @@ Eine Chart-Value `bootstrapPlugins`, die beim Pod-Start einen **initContainer**
 mit demselben Image gegen das persistente Data-Volume laufen lässt:
 
 ```bash
-hermes plugins install nickhechtel/hermes-env-setup --enable --yes-deps
+hermes plugins install delta-one-net/hermes-env-setup --enable --yes-deps
 ```
 
 Kein Secret nötig — das Repo ist **public** auf GitHub. Kein pip-Consent,
@@ -31,7 +31,7 @@ geschrieben. Passwörter/Tokens erscheinen nie im Chat, nie in Transkripten,
 nie im Modellkontext. Das ist bei MSP-Kunden der Unterschied zwischen
 „Hermes einrichten können" und „niemand traut sich, Hermes Zugänge zu geben".
 
-- Repo: <https://github.com/nickhechtel/hermes-env-setup> (public, MIT, v0.3.0)
+- Repo: <https://github.com/delta-one-net/hermes-env-setup> (public, MIT, v0.3.0)
 - Läuft stabil auf 3 Profilen auf dem Hephaestus-Host (default, daedalus, overpoch)
 - Doctor-Verifikation: „runtime discovery, manifest parsing, import, and
   registration passed — 2 tool(s)"
@@ -60,8 +60,8 @@ initContainers:
     args:
       - |
         set -eu
-        hermes plugins install nickhechtel/hermes-env-setup --enable --yes-deps \
-          || hermes plugins update nickhechtel/hermes-env-setup \
+        hermes plugins install delta-one-net/hermes-env-setup --enable --yes-deps \
+          || hermes plugins update delta-one-net/hermes-env-setup \
           || echo "WARN: env-setup bootstrap failed (pod starts anyway)"
     volumeMounts:
       - name: <DATA_VOLUME_NAME>      # ← dein Name für das persistente Volume
@@ -115,7 +115,7 @@ getesteten Commit-SHA — dann rollt nur, was abgesegnet wurde:
 bootstrapPlugins:
   enabled: true
   plugins:
-    - repo: nickhechtel/hermes-env-setup
+    - repo: delta-one-net/hermes-env-setup
       ref: 1d591a7   # getesteter Stand, bewusst bumpen
 ```
 
