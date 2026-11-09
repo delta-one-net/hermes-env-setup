@@ -52,6 +52,15 @@ def _get_env_value(name: str) -> str | None:
     return get_env_value(name)
 
 
+# Hermes ships its own YAML policy (ruamel-backed, YAML 1.1) — PyYAML is NOT a
+# guaranteed dependency (pipboy's Hermes env lacks it: ModuleNotFoundError).
+# Use the platform library first; keep PyYAML as a fallback for bare test envs.
+try:
+    from hermes_yaml import safe_load as _yaml_safe_load
+except ImportError:  # pragma: no cover - test environments shipping PyYAML
+    from yaml import safe_load as _yaml_safe_load
+
+
 def _plugins_root() -> Path:
     try:
         from hermes_constants import get_hermes_home
@@ -343,7 +352,6 @@ def _dynamic_catalog() -> list[dict]:
     root = _plugins_root()
     if not root.is_dir():
         return out
-    import yaml  # hermes itself depends on PyYAML
 
     def _specs(raw: list) -> list[dict]:
         specs = []
@@ -359,7 +367,7 @@ def _dynamic_catalog() -> list[dict]:
         if not manifest.is_file() or plugin_dir.name == PLUGIN_ID:
             continue
         try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+            data = _yaml_safe_load(manifest.read_text(encoding="utf-8")) or {}
         except Exception:
             continue
         required = _specs(data.get("requires_env"))
