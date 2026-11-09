@@ -52,13 +52,22 @@ def _get_env_value(name: str) -> str | None:
     return get_env_value(name)
 
 
-# Hermes ships its own YAML policy (ruamel-backed, YAML 1.1) — PyYAML is NOT a
-# guaranteed dependency (pipboy's Hermes env lacks it: ModuleNotFoundError).
-# Use the platform library first; keep PyYAML as a fallback for bare test envs.
-try:
-    from hermes_yaml import safe_load as _yaml_safe_load
-except ImportError:  # pragma: no cover - test environments shipping PyYAML
-    from yaml import safe_load as _yaml_safe_load
+# YAML for the optional plugin-credential discovery. This must FAIL SOFT:
+# tool contexts exist that ship neither hermes_yaml's ruamel nor PyYAML
+# (fresh-session one-shots after a PM env switch crashed here with
+# ModuleNotFoundError). The core flow (prompt/status/variables) needs no YAML
+# at all — only _dynamic_catalog() does, and it degrades to an empty list.
+def _yaml_loader():
+    for module in ("hermes_yaml", "yaml"):
+        try:
+            imported = __import__(module)
+            return imported.safe_load
+        except Exception:
+            continue
+    return None
+
+
+_YAML_SAFE_LOAD = _yaml_loader()
 
 
 def _plugins_root() -> Path:
@@ -349,6 +358,11 @@ def check_variables(names) -> dict | str:
 def _dynamic_catalog() -> list[dict]:
     """requires_env / optional_env declared by installed plugins -> integrations."""
     out: list[dict] = []
+    if _YAML_SAFE_LOAD is None:
+        logger.warning("env-setup: no YAML parser available (neither hermes_yaml "
+                       "nor PyYAML) — plugin-credential discovery disabled, "
+                       "core flow unaffected")
+        return out
     root = _plugins_root()
     if not root.is_dir():
         return out
@@ -367,7 +381,7 @@ def _dynamic_catalog() -> list[dict]:
         if not manifest.is_file() or plugin_dir.name == PLUGIN_ID:
             continue
         try:
-            data = _yaml_safe_load(manifest.read_text(encoding="utf-8")) or {}
+            data = _YAML_SAFE_LOAD(manifest.read_text(encoding="utf-8")) or {}
         except Exception:
             continue
         required = _specs(data.get("requires_env"))
