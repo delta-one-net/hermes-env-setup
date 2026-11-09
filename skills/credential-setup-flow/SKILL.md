@@ -80,3 +80,26 @@ folders, check a port — depending on the feature). If a value the user entered
 is wrong, the failure message comes from the feature, not from the secret —
 report the error and offer to re-prompt with `env_setup_prompt` for just that
 field.
+
+## Reading credentials back (profile scoping — important!)
+
+`get_env_value()` in a gateway session is scope-checked and falls back to the
+GATEWAY home's `.env` — it does **not** see profile `.env` files (e.g. values in
+`~/.hermes/profiles/<name>/.env`). To check a profile-scoped value, use a
+subprocess with the profile home and report only a boolean — never print raw
+values:
+
+```bash
+HERMES_HOME=~/.hermes/profiles/<name> python3 -c \
+  'from hermes_cli.config import load_env; print(load_env().get("KEY") is not None)'
+```
+
+## Auth failures: never retry-loop
+
+On `HTTP 401` from a third-party API with formally plausible credentials (right
+prefix/length/charset): **one single attempt, then stop.** It means wrong or
+inactive credentials on the provider side; retry-loops trigger WAF/Fail2ban
+bans on the target host — a permanent 403 then blocks ALL requests from that
+IP. Document the failure, ask the user to check the provider admin (e.g.
+Shopware: Integration active? regenerate secret), and retest only once after
+the fix.
