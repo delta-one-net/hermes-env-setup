@@ -38,27 +38,22 @@ PROMPT_SCHEMA = {
     "description": (
         "Ask the user to provide credential values (API keys, tokens, passwords) "
         "for environment variables via a masked form in the desktop app. Values "
-        "are written DIRECTLY to .env — they are NEVER returned to you and never "
+        "are written DIRECTLY to .env and NEVER returned to you and never "
         "appear in the chat. NEVER ask the user to paste secrets into the chat; "
-        "use this tool instead. Pass only variable NAMES plus human-readable "
-        "labels/help, e.g. fields=[{name: 'EMAIL_PASSWORD', label: 'Postfach-Passwort', "
-        "secret: true, required: true}], title='E-Mail einrichten', "
-        "reason='Damit Hermes dein Postfach lesen kann'. The result tells you which "
-        "variables were configured and which the user skipped — then continue setup "
-        "(the values are already live in the process). If the result is 'timeout' "
-        "or the call is interrupted, the form stays open in the desktop app; call "
-        "env_setup_status later to pick up a late completion."
+        "use this tool instead. The result tells you which variables were "
+        "configured and which the user skipped, then continue the setup."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "fields": {
-                "type": "array",
+                "type": ["array", "string"],
                 "description": (
-                    "Environment variables to request (max 12). Each entry: "
-                    "{name (required, uppercase ENV_VAR), label, description, "
-                    "example, url (where to get it), secret (true → masked input, "
-                    "default true), required (default false)}."
+                    "Environment variables to request (max 12). Pass EITHER a "
+                    "JSON array of objects or the same array as a JSON-encoded "
+                    "string. Each entry: name (REQUIRED, uppercase ENV_VAR), "
+                    "label, description, example, url, secret (true -> masked "
+                    "input), required."
                 ),
                 "items": {
                     "type": "object",
@@ -97,8 +92,20 @@ PROMPT_SCHEMA = {
 
 async def _prompt_handler(args: dict) -> str:
     reg = core.get_registry()
+    fields = (args or {}).get("fields")
+    # Models with weak nested-array tool calling may pass the array as a
+    # JSON-encoded STRING — accept both shapes (one string is what every
+    # model can build).
+    if isinstance(fields, str):
+        try:
+            fields = json.loads(fields)
+        except (json.JSONDecodeError, ValueError):
+            return _result({
+                "error": "'fields' must be a JSON array (or a JSON-encoded string of it). "
+                         "Example: [{\"name\": \"MY_API_KEY\", \"label\": \"API Key\", \"secret\": true}]"
+            })
     created = reg.create(
-        fields=(args or {}).get("fields") or [],
+        fields=fields or [],
         title=(args or {}).get("title") or "Zugänge einrichten",
         reason=(args or {}).get("reason") or "")
     if "error" in created:
