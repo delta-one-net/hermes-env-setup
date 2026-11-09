@@ -21,7 +21,7 @@
 import {
   cn, haptic, host, usePluginI18n, useQuery, useQueryClient, queryClient,
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
-  ROUTES_AREA,
+  ROUTES_AREA, useValue,
 } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -36,7 +36,9 @@ let _ctx = null
 const _seenAutoOpen = new Set()
 
 const api = {
-  requests: () => _ctx.rest('/requests'),
+  // ?profile= scopes the view to this profile's requests so a profile's
+  // desktop never sees (or resolves) another profile's credential form.
+  requests: (profile) => _ctx.rest('/requests' + (profile ? `?profile=${encodeURIComponent(profile)}` : '')),
   resolve: (rid, values, skipped) =>
     _ctx.rest(`/requests/${rid}/resolve`, { method: 'POST', body: { values, skipped } }),
   cancel: (rid) => _ctx.rest(`/requests/${rid}/cancel`, { method: 'POST', body: {} }),
@@ -251,7 +253,12 @@ function SetupForm({ request, onResolve, onCancel, onResolved, onDone, t }) {
 function SetupPage() {
   const t = usePluginI18n(ID)
   const queryClient = useQueryClient()
-  const requestsQuery = useQuery({ queryKey: [ID, 'requests'], queryFn: api.requests, refetchInterval: 5000 })
+  const profile = useValue(host.state.focusedSessionProfile)
+  const requestsQuery = useQuery({
+    queryKey: [ID, 'requests', profile],
+    queryFn: () => api.requests(profile),
+    refetchInterval: 5000,
+  })
 
   const [active, setActive] = useState(null)
   const open = ((requestsQuery.data || {}).requests || []).filter((r) => r.status === 'open')
@@ -318,7 +325,12 @@ function SetupPage() {
 function SetupChip() {
   const t = usePluginI18n(ID)
   const queryClient = useQueryClient()
-  const requestsQuery = useQuery({ queryKey: [ID, 'requests'], queryFn: api.requests, refetchInterval: 5000 })
+  const profile = useValue(host.state.focusedSessionProfile)
+  const requestsQuery = useQuery({
+    queryKey: [ID, 'requests', profile],
+    queryFn: () => api.requests(profile),
+    refetchInterval: 5000,
+  })
 
   const [active, setActive] = useState(null)       // request shown in the dialog
   const [dialogOpen, setDialogOpen] = useState(false)

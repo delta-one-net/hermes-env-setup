@@ -140,3 +140,52 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# ── profile binding (v0.3.4): requests are stamped with the owning profile ──
+
+def test_request_carries_profile_stamp(monkeypatch, tmp_path):
+    reg = _Registry()
+    athene_home = tmp_path / "profiles" / "athene"
+    monkeypatch.setattr(core, "_hermes_home", lambda: athene_home)
+    out = reg.create([{"name": "MY_KEY", "label": "Key"}], "T", "r")
+    assert out["request"]["profile"] == "athene"
+
+def test_request_default_profile_outside_profiles_dir(monkeypatch, tmp_path):
+    reg = _Registry()
+    monkeypatch.setattr(core, "_hermes_home", lambda: tmp_path)
+    out = reg.create([{"name": "MY_KEY"}], "T", "")
+    assert out["request"]["profile"] == "default"
+
+def test_resolve_writes_profile_env_not_caller_env(monkeypatch, tmp_path):
+    # gateway/backend context: default home; request owned by 'athene'
+    root = tmp_path
+    monkeypatch.setattr(core, "_hermes_home", lambda: root)
+    reg = _Registry()
+    out = reg.create([{"name": "MY_KEY", "secret": True}], "T", "")
+    assert out["request"]["profile"] == "default"  # created in default context
+    # simulate a profile-owned request: create under athene home
+    monkeypatch.setattr(core, "_hermes_home", lambda: root / "profiles" / "athene")
+    out2 = reg.create([{"name": "ATHENE_KEY", "secret": True}], "T2", "")
+    rid = out2["request"]["id"]
+    assert out2["request"]["profile"] == "athene"
+    # resolver runs in the GATEWAY (default home) — must still write athene's env
+    monkeypatch.setattr(core, "_hermes_home", lambda: root)
+    import os
+    os.environ.pop("ATHENE_KEY", None)
+    res = reg.resolve(rid, {"ATHENE_KEY": "sekrit"})
+    assert res["configured"] == ["ATHENE_KEY"]
+    assert (root / "profiles" / "athene" / ".env").read_text().find("ATHENE_KEY=sekrit") >= 0
+    assert not (root / ".env").exists() or "ATHENE_KEY" not in (root / ".env").read_text()
+    assert os.environ.get("ATHENE_KEY") is None  # gateway env stays clean
+
+def test_snapshot_filters_foreign_profiles(monkeypatch, tmp_path):
+    reg = _Registry()
+    monkeypatch.setattr(core, "_hermes_home", lambda: tmp_path / "profiles" / "athene")
+    r = reg.create([{"name": "A_KEY"}], "A", "")
+    monkeypatch.setattr(core, "_hermes_home", lambda: tmp_path)
+    reg.create([{"name": "D_KEY"}], "D", "")
+    only_athene = [x for x in reg.snapshot(profile="athene")]
+    assert [x["title"] for x in only_athene] == ["A"]
+    only_default = [x for x in reg.snapshot(profile="default")]
+    assert [x["title"] for x in only_default] == ["D"]
+    assert len(reg.snapshot()) == 2  # unfiltered view keeps everything

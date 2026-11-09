@@ -44,10 +44,16 @@ _core = _load_core()
 # ---------------------------------------------------------------------------
 
 @router.get("/requests")
-async def get_requests():
-    """Open setup requests plus recently resolved ones the agent may not have seen."""
+async def get_requests(profile: str | None = None):
+    """Open setup requests plus recently resolved ones the agent may not have seen.
+
+    ?profile=<name> scopes the view to requests created by that profile's
+    agents — a profile's desktop view never sees another profile's
+    credential requests (the request carries its owner profile stamp).
+    Without the parameter all requests are returned (fallback/compat).
+    """
     reg = _core.get_registry()
-    return {"requests": reg.snapshot()}
+    return {"requests": reg.snapshot(profile=profile)}
 
 
 @router.post("/requests/{rid}/resolve")

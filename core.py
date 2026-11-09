@@ -71,12 +71,60 @@ _YAML_SAFE_LOAD = _yaml_loader()
 
 
 def _plugins_root() -> Path:
+    return _hermes_home() / "plugins"
+
+
+def _hermes_home() -> Path:
     try:
         from hermes_constants import get_hermes_home
-        return Path(get_hermes_home()) / "plugins"
+        return Path(get_hermes_home())
     except Exception:  # pragma: no cover - defensive
         home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-        return Path(home) / "plugins"
+        return Path(home)
+
+
+def _profile_name(home: Path) -> str:
+    """'athene' for a profile home, 'default' for the launcher/gateway home."""
+    home = Path(home)
+    parts = home.parts
+    if len(parts) >= 2 and parts[-2] == "profiles":
+        return parts[-1]
+    return "default"
+
+
+def _profiles_base(home: Path) -> Path:
+    """The root .hermes dir that contains profiles/ (identity-stable across contexts)."""
+    home = Path(home)
+    parts = home.parts
+    if len(parts) >= 2 and parts[-2] == "profiles":
+        return home.parent.parent
+    return home
+
+
+def _profile_env_path(profile: str, base: Path) -> Path:
+    return Path(base) / "profiles" / profile / ".env"
+
+
+def _write_env_line(path: Path, name: str, value: str) -> None:
+    """Set KEY=value in an .env file atomically (profile-scoped writer).
+
+    save_env_value writes to get_hermes_home() of the CALLING process — the
+    gateway backend runs in the default home, so profile-scoped requests must
+    be written here instead. Quote values that would break dotenv parsing.
+    """
+    pattern = re.compile(rf"^{re.escape(name)}=")
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        kept = [l for l in lines if not pattern.match(l)]
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        kept = []
+    needs_quotes = re.search(r"[\s#\"']", value)
+    entry = f'{name}="{value}"' if needs_quotes else f"{name}={value}"
+    kept.append(entry + "\n")
+    tmp = path.with_suffix(".env.tmp")
+    tmp.write_text("".join(kept), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _broadcast(event: str, payload: dict | None) -> None:
@@ -147,25 +195,37 @@ def _catalog_field(spec: dict) -> dict:
 # Value writing (shared by request-resolve and the direct /configure flow)
 # ---------------------------------------------------------------------------
 
-def write_values(values: dict) -> dict:
-    """Write KEY=VALUE pairs to .env. Returns {configured, skipped, errors}.
+def write_values(values: dict, profile: str | None = None) -> dict:
+    """Write KEY=VALUE pairs to the .env of the owning profile.
 
-    Caller validates names belong to an allowed set; this function only
-    refuses empty values (→ skipped) and collects write errors.
+    profile='default' (or None) → the canonical save_env_value path plus
+    os.environ mirroring (the calling process owns that .env).
+    Any other profile → writes to <root>/profiles/<name>/.env via the
+    profile-scoped writer and does NOT touch this process's environ —
+    the resolver runs in the gateway (default home) and must not leak
+    profile credentials into the gateway environment.
+    Returns {configured, skipped, errors}.
     """
     configured: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+    profile = profile or "default"
+    profile_env_path = None
+    if profile != "default":
+        profile_env_path = _profile_env_path(profile, _profiles_base(_hermes_home()))
     for name, value in values.items():
         value = value if isinstance(value, str) else str(value)
         if not value.strip():
             skipped.append(name)
             continue
         try:
-            _save_env_value(name, value)
-            # Mirror the installer behaviour: also expose it to the running
-            # process so adapters pick it up without a restart.
-            os.environ[name] = value
+            if profile_env_path is not None:
+                _write_env_line(profile_env_path, name, value)
+            else:
+                _save_env_value(name, value)
+                # Mirror the installer behaviour: also expose it to the running
+                # process so adapters pick it up without a restart.
+                os.environ[name] = value
             configured.append(name)
         except Exception as exc:  # .env write failed — report, continue
             logger.exception("env-setup: failed writing %s", name)
@@ -179,9 +239,11 @@ def write_values(values: dict) -> dict:
 
 class _Request:
     __slots__ = ("id", "title", "reason", "fields", "status", "created",
-                 "resolved_at", "configured", "skipped", "consumed", "waiter")
+                 "resolved_at", "configured", "skipped", "consumed", "waiter",
+                 "profile")
 
-    def __init__(self, title: str, reason: str, fields: list[dict]):
+    def __init__(self, title: str, reason: str, fields: list[dict],
+                 profile: str = "default"):
         self.id = uuid.uuid4().hex[:12]
         self.title = title
         self.reason = reason
@@ -193,6 +255,7 @@ class _Request:
         self.skipped: list[str] = []
         self.consumed = False
         self.waiter = threading.Event()
+        self.profile = profile or "default"
 
     def public(self) -> dict:
         """Serializable projection — field metadata only, never values."""
@@ -207,6 +270,7 @@ class _Request:
             "configured": list(self.configured),
             "skipped": list(self.skipped),
             "consumed": self.consumed,
+            "profile": self.profile,
         }
 
 
@@ -230,7 +294,8 @@ class _Registry:
 
     # -- create ---------------------------------------------------------------
 
-    def create(self, fields: list[dict], title: str, reason: str) -> dict:
+    def create(self, fields: list[dict], title: str, reason: str,
+               profile: str | None = None) -> dict:
         """Validate and register a new request. Returns the public dict or {'error': ...}."""
         if not isinstance(fields, list) or not fields:
             return {"error": "fields must be a non-empty list"}
@@ -243,10 +308,14 @@ class _Registry:
             if err:
                 return {"error": err}
             normalized.append(field)
+        # Stamp the owning profile from the CALLING context (the agent
+        # session runs in its profile's home) — the request stays bound to
+        # it for routing and for the profile-scoped .env write on resolve.
         req = _Request(
             _norm_text(title, 80) or "Zugänge einrichten",
             _norm_text(reason, 300),
-            normalized)
+            normalized,
+            profile=profile or _profile_name(_hermes_home()))
         with self._lock:
             self._prune_locked()
             # Supersede any still-open request: one dialog at a time.
@@ -271,7 +340,7 @@ class _Registry:
             for key in values:
                 if key not in allowed:
                     return {"error": f"field {key!r} was not part of request {rid!r}"}
-            written = write_values(values)
+            written = write_values(values, profile=req.profile)
             req.configured = written["configured"]
             req.skipped = written["skipped"]
             for name in (skipped or []):
@@ -305,10 +374,13 @@ class _Registry:
             req = self._requests.get(rid)
             return req.public() if req else None
 
-    def snapshot(self, include_resolved: bool = True) -> list[dict]:
+    def snapshot(self, include_resolved: bool = True,
+                 profile: str | None = None) -> list[dict]:
         with self._lock:
             out = []
             for req in sorted(self._requests.values(), key=lambda r: r.created):
+                if profile and req.profile != profile:
+                    continue  # profile-scoped view: other profiles stay invisible
                 if req.status == "open" or (include_resolved and not req.consumed):
                     out.append(req.public())
             return out
