@@ -13,7 +13,8 @@ am Runbook-Ablauf (Bifrost → Infisical → HelmRelease) etwas zu ändern.
 ## TL;DR
 
 Eine Chart-Value `bootstrapPlugins`, die beim Pod-Start einen **initContainer**
-mit demselben Image gegen das persistente Data-Volume laufen lässt:
+mit demselben Image gegen das persistente Data-Volume laufen lässt und pro
+Eintrag aus `bootstrapPlugins.plugins` installiert. Beispiel:
 
 ```bash
 hermes plugins install delta-one-net/hermes-env-setup --enable --yes-deps
@@ -48,6 +49,9 @@ bootstrapPlugins:
 
 ### 2. initContainer-Template (Deployment), values-gated
 
+Der initContainer geht über **`bootstrapPlugins.plugins`** — nichts ist
+gehardcoded. Jeder Listeneintrag `{repo, ref?}` wird installiert:
+
 ```yaml
 {{- if .Values.bootstrapPlugins.enabled }}
 initContainers:
@@ -60,22 +64,36 @@ initContainers:
     args:
       - |
         set -eu
-        hermes plugins install delta-one-net/hermes-env-setup --enable --yes-deps \
-          || hermes plugins update delta-one-net/hermes-env-setup \
-          || echo "WARN: env-setup bootstrap failed (pod starts anyway)"
+        {{- range $p := .Values.bootstrapPlugins.plugins }}
+        if hermes plugins install {{ $p.repo }} --enable --yes-deps {{ if $p.ref }}--ref {{ $p.ref }} {{ end }}; then
+          echo "bootstrap: {{ $p.repo }} ok"
+        elif hermes plugins update {{ $p.repo }}; then
+          echo "bootstrap: {{ $p.repo }} updated (was already present)"
+        else
+          echo "WARN: bootstrap failed for {{ $p.repo }} (pod starts anyway)"
+        fi
+        {{- end }}
     volumeMounts:
-      - name: <DATA_VOLUME_NAME>      # ← dein Name für das persistente Volume
-        mountPath: <DATA_MOUNT_PATH>  # ← dein Mount-Pfad (Main-Container-Mount desselben Volumes)
+      # Init containers nutzen dieselben volumes wie normale Container:
+      # die Pod-volumes-Sektion (claim-gebunden) bleibt, wie sie ist — der
+      # initContainer mountet nur denselben Namen + mountPath, den der
+      # Main-Container für den persistenten Data-Pfad verwendet. Kein
+      # zusätzliches Volume, keine zusätzliche Spec.
+      - name: {{ <volume name aus dem Main-Container-Template> }}
+        mountPath: {{ <mountPath aus dem Main-Container-Template> }}
 {{- end }}
 ```
 
 **Kritische Punkte:**
 
 - **Idempotenz:** `plugins install` schlägt mit „already exists" fehl, wenn
-  das Plugin schon im Volume liegt → per `|| plugins update` abfangen. Der
+  das Plugin schon im Volume liegt → per `elif plugins update` abfangen. Der
   initContainer darf **nie** einen Crash-Loop produzieren, nur weil ein
-  Plugin bereits installiert ist. Deshalb der letzte `|| echo` als
+  Plugin bereits installiert ist. Deshalb der `else`-Zweig als
   non-fatal-Exit.
+- **`--ref` pinnt auf einen immutablen 40-Zeichen-Git-SHA** (CLI-Vertrag:
+  `hermes plugins install --ref COMMIT_SHA`). Kurz-SHAs lehnt die CLI ab —
+  beim Pinning also den vollen SHA eintragen (siehe Abschnitt 4).
 - **Dasselbe Volume wie der Main-Container**, sonst installiert der
   initContainer ins Leere und der Pod startet ohne Plugin. Gleiche UID/GID
   wie der Volume-Besitzer (im Docker-Referenzlayout der Profile-Files: 10000).
@@ -90,42 +108,53 @@ initContainers:
 
 - **Bestehende Tenants:** in jeder HelmRelease unter
   `clusters/prod/apps/hermes/tenants/<tenant>.yaml` den `values:`-Block
-  ergänzen:
+  ergänzen — **mit der plugins-Liste**, denn `enabled: true` allein ist eine
+  No-op (der initContainer iteriert nur, was in `plugins` steht):
 
   ```yaml
   values:
     bootstrapPlugins:
       enabled: true
+      plugins:
+        - repo: delta-one-net/hermes-env-setup
   ```
 
   → Flux reconciles → Pod-Rollout → init läuft → Plugin + Tools + Skill sind
   in jeder neuen Session des Tenants. Kein manueller Schritt danach.
 
-- **Neue Tenants:** eine Zeile ins Runbook-Kapitel „GitOps / Flux" aufnehmen
-  („values: bootstrapPlugins.enabled: true") — fertig. Ab dann ist
-  Plugin-Versorgung implizit.
+- **Neue Tenants:** die drei Zeilen ins Runbook-Kapitel „GitOps / Flux"
+  aufnehmen — fertig. Ab dann ist Plugin-Versorgung implizit.
 
 ### 4. Empfehlung: Pinning für Kundentenants
 
 Für interne/Entwicklungs-Tenants: `main` ziehen (aktueller Stand beim
 Pod-Start). Für Kundentenants empfehle ich `ref:`-Pinning auf einen
-getesteten Commit-SHA — dann rollt nur, was abgesegnet wurde:
+getesteten **40-Zeichen-Commit-SHA** (CLI-Vertrag, Kurz-SHAs werden
+abgelehnt) — dann rollt nur, was abgesegnet wurde:
 
 ```yaml
 bootstrapPlugins:
   enabled: true
   plugins:
     - repo: delta-one-net/hermes-env-setup
-      ref: 1d591a7   # getesteter Stand, bewusst bumpen
+      ref: 54ac821356883e2de3cb65834db3c835b8a57ec1   # v0.3.5, bewusst bumpen
 ```
 
 ## Offene Punkte, die nur du beantworten kannst (2 Minuten)
 
-1. Name des persistenten Volumes im Chart + Mount-Pfad im Main-Container
+1. **Volume-Name + Mount-Pfad:** beantwortet durch dein Review — init
+   containers nutzen dieselben volume-Definitionen wie normale Container.
+   Im Template einfach den identischen Namen + mountPath aus deinem
+   Main-Container-Template für den persistenten Data-Mount wiederverwenden
+   (ggf. als Helm-Partial), die claim-gebundene Pod-volumes-Sektion bleibt
+   unverändert.
 2. UID/GID des Volume-Besitzers (für den initContainer-SecurityContext)
 3. Egress-Policy: HTTPS zu github.com erlaubt?
 4. Sollen die `bootstrapPlugins.plugins` direkt pro Tenant-Werte überschreibbar
-   sein (Liste per Helm-Value) oder reicht ein Chart-Default?
+   sein (Liste per Helm-Value, wie oben im Rollout gezeigt) oder reicht ein
+   Chart-Default? Anmerkung: der offene Fleet-MR !1 (`do-nick`) setzt bislang
+   nur `enabled: true` — er bräuchte die plugins-Liste ergänzt, sobald der
+   Chart das Feature hat.
 
 ## Abgeprüfte Alternativen (nicht bauen)
 
