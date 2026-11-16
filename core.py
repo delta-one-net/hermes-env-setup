@@ -13,6 +13,9 @@ returns field NAMES and set/unset flags only.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import json
 import logging
 import os
 import re
@@ -21,6 +24,19 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """Cross-process exclusive lock (POSIX flock) guarding one registry write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 logger = logging.getLogger("hermes.plugins.env-setup")
 
@@ -293,23 +309,60 @@ class _Request:
         }
 
 
+def _registry_path() -> Path:
+    """One shared store across ALL hermes processes on this host (dashboard
+    server, agent gateway, kernels): the RAM-registry split when dashboard and
+    gateway restarted as separate processes — the chip polled one process's
+    empty copy while the agents filled the other (2026-11-16). The store lives
+    in the ROOT home's plugin dir, so every profile's requests share one file
+    (separation is the per-request profile stamp), and on a tenant pod it stays
+    inside that pod's HERMES_HOME."""
+    return _profiles_base(_hermes_home()) / "plugins" / "env-setup" / ".requests.json"
+
+
 class _Registry:
+    """File-backed request store — one JSON document, flocked for writers.
+
+    Cross-process by design: dashboard REST handlers and gateway agent tools
+    hit the same file, so a request created by an agent turn is immediately
+    visible to the desktop form (and vice versa). Waiters poll (the prompt
+    handler already polls at 1.5s), so no cross-process events are needed."""
+
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._requests: dict[str, _Request] = {}
+        self._lock = threading.Lock()   # intra-process write serialization
+
+    # -- file layer -----------------------------------------------------------
+
+    def _load(self) -> dict[str, dict]:
+        path = _registry_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.exception("env-setup: registry file unreadable — resetting")
+        return {}
+
+    def _save(self, requests: dict[str, dict]) -> None:
+        path = _registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(requests), encoding="utf-8")
+        os.replace(tmp, path)
 
     # -- internal maintenance ------------------------------------------------
 
-    def _prune_locked(self) -> None:
+    def _prune(self, requests: dict[str, dict]) -> None:
         now = time.time()
-        stale = [rid for rid, r in self._requests.items()
-                 if now - (r.resolved_at or r.created) > MAX_AGE_SECONDS]
-        for rid in stale:
-            del self._requests[rid]
-        if len(self._requests) > MAX_REQUESTS:
-            ordered = sorted(self._requests.values(), key=lambda r: r.created)
-            for r in ordered[: len(self._requests) - MAX_REQUESTS]:
-                del self._requests[r.id]
+        for rid, r in list(requests.items()):
+            if now - (r.get("resolved_at") or r.get("created", now)) > MAX_AGE_SECONDS:
+                del requests[rid]
+        if len(requests) > MAX_REQUESTS:
+            ordered = sorted(requests.values(), key=lambda r: r.get("created", 0))
+            for r in ordered[: len(requests) - MAX_REQUESTS]:
+                del requests[r["id"]]
 
     # -- create ---------------------------------------------------------------
 
@@ -332,54 +385,57 @@ class _Registry:
             _norm_text(reason, 300),
             normalized,
             profile=profile or _turn_profile())
-        with self._lock:
-            self._prune_locked()
+        with self._lock, _file_lock(_registry_path()):
+            requests = self._load()
+            self._prune(requests)
             # Supersede any still-open request: one dialog at a time.
-            for other in self._requests.values():
-                if other.status == "open":
-                    other.status = "superseded"
-                    other.waiter.set()
-            self._requests[req.id] = req
+            for other in requests.values():
+                if other.get("status") == "open":
+                    other["status"] = "superseded"
+            requests[req.id] = req.public()
+            self._save(requests)
         _broadcast("request.created", {"request": req.public()})
         return {"request": req.public()}
 
     # -- resolve / cancel -----------------------------------------------------
 
     def resolve(self, rid: str, values: dict, skipped: list | None = None) -> dict:
-        with self._lock:
-            req = self._requests.get(rid)
-            if req is None or req.status != "open":
+        with self._lock, _file_lock(_registry_path()):
+            requests = self._load()
+            req = requests.get(rid)
+            if req is None or req.get("status") != "open":
                 return {"error": f"no open request {rid!r}"}
             if not isinstance(values, dict):
                 return {"error": "values must be an object"}
-            allowed = {f["name"] for f in req.fields}
+            allowed = {f["name"] for f in req.get("fields", [])}
             for key in values:
                 if key not in allowed:
                     return {"error": f"field {key!r} was not part of request {rid!r}"}
-            written = write_values(values, profile=req.profile)
-            req.configured = written["configured"]
-            req.skipped = written["skipped"]
+            written = write_values(values, profile=req.get("profile"))
+            req["configured"] = written["configured"]
+            req["skipped"] = written["skipped"]
             for name in (skipped or []):
-                if name in allowed and name not in req.configured and name not in req.skipped:
-                    req.skipped.append(name)
-            req.status = "resolved"
-            req.resolved_at = time.time()
-            req.waiter.set()
-        _broadcast("request.resolved", {"id": rid, "configured": req.configured,
-                                        "skipped": req.skipped})
-        out = {"configured": req.configured, "skipped": req.skipped}
+                if name in allowed and name not in req["configured"] and name not in req["skipped"]:
+                    req["skipped"].append(name)
+            req["status"] = "resolved"
+            req["resolved_at"] = time.time()
+            self._save(requests)
+        _broadcast("request.resolved", {"id": rid, "configured": req["configured"],
+                                        "skipped": req["skipped"]})
+        out = {"configured": req["configured"], "skipped": req["skipped"]}
         if written["errors"]:
             out["errors"] = written["errors"]
         return out
 
     def cancel(self, rid: str) -> dict:
-        with self._lock:
-            req = self._requests.get(rid)
-            if req is None or req.status != "open":
+        with self._lock, _file_lock(_registry_path()):
+            requests = self._load()
+            req = requests.get(rid)
+            if req is None or req.get("status") != "open":
                 return {"error": f"no open request {rid!r}"}
-            req.status = "cancelled"
-            req.resolved_at = time.time()
-            req.waiter.set()
+            req["status"] = "cancelled"
+            req["resolved_at"] = time.time()
+            self._save(requests)
         _broadcast("request.cancelled", {"id": rid})
         return {"cancelled": rid}
 
@@ -387,25 +443,29 @@ class _Registry:
 
     def get(self, rid: str) -> dict | None:
         with self._lock:
-            req = self._requests.get(rid)
-            return req.public() if req else None
+            return self._load().get(rid)
 
     def snapshot(self, include_resolved: bool = True,
                  profile: str | None = None) -> list[dict]:
-        with self._lock:
+        with self._lock, _file_lock(_registry_path()):
+            requests = self._load()
+            self._prune(requests)
+            self._save(requests)
             out = []
-            for req in sorted(self._requests.values(), key=lambda r: r.created):
-                if profile and req.profile != profile:
+            for req in sorted(requests.values(), key=lambda r: r.get("created", 0)):
+                if profile and req.get("profile") != profile:
                     continue  # profile-scoped view: other profiles stay invisible
-                if req.status == "open" or (include_resolved and not req.consumed):
-                    out.append(req.public())
+                if req.get("status") == "open" or (include_resolved and not req.get("consumed")):
+                    out.append(req)
             return out
 
     def mark_consumed(self, rid: str) -> None:
-        with self._lock:
-            req = self._requests.get(rid)
+        with self._lock, _file_lock(_registry_path()):
+            requests = self._load()
+            req = requests.get(rid)
             if req is not None:
-                req.consumed = True
+                req["consumed"] = True
+                self._save(requests)
 
 
 def get_registry() -> _Registry:
