@@ -21,7 +21,7 @@
 import {
   cn, haptic, host, usePluginI18n, useQuery, useQueryClient, queryClient,
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
-  ROUTES_AREA, useValue,
+  ROUTES_AREA,
 } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -253,9 +253,6 @@ function SetupForm({ request, onResolve, onCancel, onResolved, onDone, t }) {
 function SetupPage() {
   const t = usePluginI18n(ID)
   const queryClient = useQueryClient()
-  const profile = useValue(
-    host.state.focusedSessionProfile || host.state.profile
-      || { get: () => null, listen: () => () => {} })
   const requestsQuery = useQuery({
     queryKey: [ID, 'requests'],
     queryFn: () => api.requests(),
@@ -333,14 +330,9 @@ function SetupPage() {
 function SetupChip() {
   const t = usePluginI18n(ID)
   const queryClient = useQueryClient()
-  // App idiom: older desktops have no focusedSessionProfile atom — fall back
-  // to the process profile atom, then a null atom (=> unfiltered view).
-  const profile = useValue(
-    host.state.focusedSessionProfile || host.state.profile
-      || { get: () => null, listen: () => () => {} })
-  // Query ALL open requests (profile filtering is presentation-side only):
-  // a request must never become invisible just because the focused-profile
-  // atom is missing or disagrees — that is how forms got lost before.
+  // No host.state atoms at all: reading the focused-profile atom crashed the
+  // whole statusbar on some desktop builds (v0.3.7). The profile is carried
+  // per-request by the backend (r.profile) — nothing else is needed.
   const requestsQuery = useQuery({
     queryKey: [ID, 'requests'],
     queryFn: () => api.requests(),
@@ -353,13 +345,10 @@ function SetupChip() {
 
   const requests = (requestsQuery.data || {}).requests || []
   const open = requests.filter((r) => r.status === 'open')
-  // Own = this profile's request (auto-pops). Foreign = another profile's —
-  // never auto-pops, but the chip counts it and a click opens it (resolving it
-  // still writes into the REQUEST's profile, not the viewer's).
-  const own = open.filter((r) => !profile || r.profile === profile)
-  const foreign = open.filter((r) => profile && r.profile !== profile)
-  const pending = own[0] || null
-  const foreignPending = foreign[0] || null
+  // Auto-pop the first open request regardless of owning profile — resolving
+  // writes into the request's own profile (backend-side, v0.3.6+), so showing
+  // it everywhere can never misroute values. It just must never be invisible.
+  const pending = open[0] || null
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: [ID] })
 
@@ -411,22 +400,17 @@ function SetupChip() {
     children: [
       jsx('button', {
         type: 'button',
-        title: pending
-          ? t('chipActiveTip')
-          : foreignPending
-            ? `${t('chipTip')} [${foreignPending.profile}]`
-            : t('chipTip'),
+        title: pending ? t('chipActiveTip') : t('chipTip'),
         className: cn(
           'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] font-medium transition-colors',
-          pending || foreignPending
+          pending
             ? 'text-(--ui-accent) bg-(--chrome-action-hover) animate-pulse'
             : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
         ),
         onClick: () => {
           haptic('tap')
-          const target = pending || foreignPending
-          if (target) {
-            setActive(target)
+          if (pending) {
+            setActive(pending)
             setDialogOpen(true)
           } else {
             host.navigate('/setup')
