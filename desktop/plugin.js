@@ -253,10 +253,12 @@ function SetupForm({ request, onResolve, onCancel, onResolved, onDone, t }) {
 function SetupPage() {
   const t = usePluginI18n(ID)
   const queryClient = useQueryClient()
-  const profile = useValue(host.state.focusedSessionProfile)
+  const profile = useValue(
+    host.state.focusedSessionProfile || host.state.profile
+      || { get: () => null, listen: () => () => {} })
   const requestsQuery = useQuery({
-    queryKey: [ID, 'requests', profile],
-    queryFn: () => api.requests(profile),
+    queryKey: [ID, 'requests'],
+    queryFn: () => api.requests(),
     refetchInterval: 5000,
   })
 
@@ -276,7 +278,13 @@ function SetupPage() {
           className: 'flex flex-col gap-1 rounded-lg border border-(--ui-accent) p-4',
           children: [
             jsxs('span', { className: 'text-sm font-semibold', children: ['🔐 ', t('agentAsks')] }),
-            jsx('h2', { className: 'text-base font-semibold', children: active.title }),
+            jsxs('h2', { className: 'text-base font-semibold', children: [
+              active.title,
+              jsx('span', {
+                className: 'ml-2 rounded-full border border-(--ui-stroke-secondary) px-2 py-0.5 text-[0.625rem] font-normal text-(--ui-text-tertiary)',
+                children: active.profile || 'default',
+              }),
+            ] }),
             active.reason
               ? jsx('span', { className: 'text-[0.75rem] text-(--ui-text-tertiary)', children: active.reason })
               : null,
@@ -325,10 +333,17 @@ function SetupPage() {
 function SetupChip() {
   const t = usePluginI18n(ID)
   const queryClient = useQueryClient()
-  const profile = useValue(host.state.focusedSessionProfile)
+  // App idiom: older desktops have no focusedSessionProfile atom — fall back
+  // to the process profile atom, then a null atom (=> unfiltered view).
+  const profile = useValue(
+    host.state.focusedSessionProfile || host.state.profile
+      || { get: () => null, listen: () => () => {} })
+  // Query ALL open requests (profile filtering is presentation-side only):
+  // a request must never become invisible just because the focused-profile
+  // atom is missing or disagrees — that is how forms got lost before.
   const requestsQuery = useQuery({
-    queryKey: [ID, 'requests', profile],
-    queryFn: () => api.requests(profile),
+    queryKey: [ID, 'requests'],
+    queryFn: () => api.requests(),
     refetchInterval: 5000,
   })
 
@@ -338,7 +353,13 @@ function SetupChip() {
 
   const requests = (requestsQuery.data || {}).requests || []
   const open = requests.filter((r) => r.status === 'open')
-  const pending = open[0] || null
+  // Own = this profile's request (auto-pops). Foreign = another profile's —
+  // never auto-pops, but the chip counts it and a click opens it (resolving it
+  // still writes into the REQUEST's profile, not the viewer's).
+  const own = open.filter((r) => !profile || r.profile === profile)
+  const foreign = open.filter((r) => profile && r.profile !== profile)
+  const pending = own[0] || null
+  const foreignPending = foreign[0] || null
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: [ID] })
 
@@ -390,17 +411,22 @@ function SetupChip() {
     children: [
       jsx('button', {
         type: 'button',
-        title: pending ? t('chipActiveTip') : t('chipTip'),
+        title: pending
+          ? t('chipActiveTip')
+          : foreignPending
+            ? `${t('chipTip')} [${foreignPending.profile}]`
+            : t('chipTip'),
         className: cn(
           'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] font-medium transition-colors',
-          pending
+          pending || foreignPending
             ? 'text-(--ui-accent) bg-(--chrome-action-hover) animate-pulse'
             : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
         ),
         onClick: () => {
           haptic('tap')
-          if (pending) {
-            setActive(pending)
+          const target = pending || foreignPending
+          if (target) {
+            setActive(target)
             setDialogOpen(true)
           } else {
             host.navigate('/setup')
@@ -419,7 +445,13 @@ function SetupChip() {
                 children: [
                   jsxs(DialogHeader, {
                     children: [
-                      jsx(DialogTitle, { children: `🔐 ${active.title}` }),
+                      jsxs(DialogTitle, { children: [
+                      `🔐 ${active.title}`,
+                      jsx('span', {
+                        className: 'ml-2 rounded-full border border-(--ui-stroke-secondary) px-2 py-0.5 text-[0.625rem] font-normal text-(--ui-text-tertiary)',
+                        children: active.profile || 'default',
+                      }),
+                    ] }),
                       jsx(DialogDescription, {
                         children: active.reason
                           ? `${t('agentAsks')} — ${active.reason}`
