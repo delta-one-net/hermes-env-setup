@@ -13,6 +13,7 @@ clean them up again (pre-cleanup at start makes the suite idempotent).
 """
 
 import importlib.util
+import types as types_mod
 import json
 import os
 import sys
@@ -189,3 +190,26 @@ def test_snapshot_filters_foreign_profiles(monkeypatch, tmp_path):
     only_default = [x for x in reg.snapshot(profile="default")]
     assert [x["title"] for x in only_default] == ["D"]
     assert len(reg.snapshot()) == 2  # unfiltered view keeps everything
+
+
+def test_turn_profile_prefers_secret_scope_binding(monkeypatch, tmp_path):
+    # multiplexed gateway: the turn's scope binding is authoritative
+    fake_scope = types_mod.ModuleType("agent.secret_scope")
+    fake_scope.current_secret_scope_home = lambda: str(tmp_path / "profiles" / "athene")
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", fake_scope)
+    # process home disagrees — scope must win
+    monkeypatch.setattr(core, "_hermes_home", lambda: tmp_path)
+    assert core._turn_profile() == "athene"
+
+def test_turn_profile_falls_back_to_home_when_unbound(monkeypatch, tmp_path):
+    fake_scope = types_mod.ModuleType("agent.secret_scope")
+    fake_scope.current_secret_scope_home = lambda: None   # no binding
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", fake_scope)
+    monkeypatch.setattr(core, "_hermes_home", lambda: tmp_path / "profiles" / "daedalus")
+    assert core._turn_profile() == "daedalus"
+
+def test_turn_profile_without_scope_module(monkeypatch, tmp_path):
+    # scope import unavailable (CLI/kernels) → home fallback
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", None)
+    monkeypatch.setattr(core, "_hermes_home", lambda: tmp_path)
+    assert core._turn_profile() == "default"

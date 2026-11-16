@@ -22,7 +22,10 @@ logger = logging.getLogger("hermes.plugins.env-setup")
 TOOLSET = "env_setup"
 
 DEFAULT_WAIT_S = 150
-MAX_WAIT_S = 900
+# The dispatcher kills long tool executions with a hard TimeoutError — keep
+# the wait clearly below that or the agent sees TOOL_ERROR instead of a clean
+# 'timeout' result (observed at 600s, 2026-11-16).
+MAX_WAIT_S = 300
 
 
 def _result(payload: dict) -> str:
@@ -218,10 +221,12 @@ async def _status_handler(args: dict) -> str:
             for i in snap["integrations"]
         ],
         "open_requests": [
-            {"id": r["id"], "title": r["title"]} for r in snap["open_requests"]
+            {"id": r["id"], "title": r["title"], "profile": r.get("profile")}
+            for r in snap["open_requests"]
         ],
         "recently_resolved": [
-            {"id": r["id"], "configured": r["configured"], "skipped": r["skipped"]}
+            {"id": r["id"], "profile": r.get("profile"),
+             "configured": r["configured"], "skipped": r["skipped"]}
             for r in snap["recently_resolved"]
         ],
     }

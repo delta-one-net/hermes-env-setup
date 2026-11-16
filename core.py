@@ -92,6 +92,25 @@ def _profile_name(home: Path) -> str:
     return "default"
 
 
+def _turn_profile() -> str:
+    """Profile owning the current turn.
+
+    Authoritative first: the secret-scope binding — the multiplexed gateway
+    stamps each routed turn with its profile home, and the scope is a
+    contextvar, so it reaches the tool handler even when the call went through
+    the tool_call wrapper dispatch. Falls back to the hermes home for
+    single-profile hosts, CLI one-shots and kernels.
+    """
+    try:
+        from agent.secret_scope import current_secret_scope_home
+        scoped = current_secret_scope_home()
+        if scoped:
+            return _profile_name(Path(scoped))
+    except Exception:
+        pass
+    return _profile_name(_hermes_home())
+
+
 def _profiles_base(home: Path) -> Path:
     """The root .hermes dir that contains profiles/ (identity-stable across contexts)."""
     home = Path(home)
@@ -308,14 +327,11 @@ class _Registry:
             if err:
                 return {"error": err}
             normalized.append(field)
-        # Stamp the owning profile from the CALLING context (the agent
-        # session runs in its profile's home) — the request stays bound to
-        # it for routing and for the profile-scoped .env write on resolve.
         req = _Request(
             _norm_text(title, 80) or "Zugänge einrichten",
             _norm_text(reason, 300),
             normalized,
-            profile=profile or _profile_name(_hermes_home()))
+            profile=profile or _turn_profile())
         with self._lock:
             self._prune_locked()
             # Supersede any still-open request: one dialog at a time.
